@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.sample.logits_processor.interface import (
-    BatchUpdate,
-    MoveDirectionality,
-)
+from vllm.v1.sample.logits_processor.builtin import process_dict_updates
+from vllm.v1.sample.logits_processor.interface import BatchUpdate
 
 if TYPE_CHECKING:
     from vllm.config.reasoning import ReasoningConfig
@@ -82,34 +81,21 @@ class ThinkingBudgetStateHolder:
 
     def sync_batch(self, batch_update: BatchUpdate | None) -> None:
         """Add/remove/move per-request state only (no _update_think_state)."""
-        if not self.is_enabled or not batch_update:
-            return
-        for index in batch_update.removed:
-            self._state.pop(index, None)
+        if self.is_enabled:
+            process_dict_updates(self._state, batch_update, self._new_state_entry)
 
-        for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
-            thinking_token_budget = params.thinking_token_budget
-            if thinking_token_budget is not None:
-                self._state[index] = self._init_state_entry(
-                    prompt_tok_ids, thinking_token_budget
-                )
-                self._state[index]["output_tok_ids"] = output_tok_ids
-                self._state[index]["spec_token_ids"] = []
-            else:
-                self._state.pop(index, None)
-
-        for i1, i2, direction in batch_update.moved:
-            if direction == MoveDirectionality.SWAP:
-                state1 = self._state.pop(i1, None)
-                state2 = self._state.pop(i2, None)
-                if state1 is not None:
-                    self._state[i2] = state1
-                if state2 is not None:
-                    self._state[i1] = state2
-            else:
-                state = self._state.pop(i1, None)
-                if state is not None:
-                    self._state[i2] = state
+    def _new_state_entry(
+        self,
+        params: SamplingParams,
+        prompt_tok_ids: list[int] | None,
+        output_tok_ids: list[int],
+    ) -> dict[str, Any] | None:
+        if params.thinking_token_budget is None:
+            return None
+        state = self._init_state_entry(prompt_tok_ids, params.thinking_token_budget)
+        state["output_tok_ids"] = output_tok_ids
+        state["spec_token_ids"] = []
+        return state
 
     def update_state(
         self,

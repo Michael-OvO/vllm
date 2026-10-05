@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.sample.utils import create_mock_reasoning_config
+from vllm.config.reasoning import ReasoningConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.torch_utils import make_tensor_with_pad
@@ -622,7 +624,9 @@ PROMPT_EMBEDS_HIDDEN = 8
 PROMPT_EMBEDS_LEN = 4
 
 
-def _make_input_batch(is_pooling_model: bool = False) -> InputBatch:
+def _make_input_batch(
+    is_pooling_model: bool = False, reasoning_config: ReasoningConfig | None = None
+) -> InputBatch:
     return InputBatch(
         max_num_reqs=2,
         max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
@@ -633,6 +637,7 @@ def _make_input_batch(is_pooling_model: bool = False) -> InputBatch:
         kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         is_pooling_model=is_pooling_model,
+        reasoning_config=reasoning_config,
     )
 
 
@@ -653,12 +658,14 @@ def _make_embeds_request(req_id: str, pooling: bool = False) -> CachedRequestSta
     )
 
 
-def _make_token_request(req_id: str) -> CachedRequestState:
+def _make_token_request(
+    req_id: str, sampling_params: SamplingParams | None = None
+) -> CachedRequestState:
     return CachedRequestState(
         req_id=req_id,
         prompt_token_ids=[10, 11, 12, 13],
         mm_features=[],
-        sampling_params=SamplingParams(),
+        sampling_params=sampling_params or SamplingParams(),
         block_ids=([],),
         generator=None,
         num_computed_tokens=0,
@@ -697,6 +704,28 @@ def test_reused_slot_does_not_retain_prompt_embeds():
     input_batch.add_request(token_req)
     assert input_batch.req_id_to_index[token_req.req_id] == slot
     assert slot not in input_batch.req_prompt_embeds
+
+
+def test_condense_does_not_leak_thinking_budget_into_moved_request():
+    """condense() moves a request into a finished request's slot without listing
+    that slot as removed; the mover must not inherit the old thinking budget."""
+    input_batch = _make_input_batch(
+        reasoning_config=create_mock_reasoning_config([1], [2])
+    )
+    input_batch.add_request(
+        _make_token_request("budgeted", SamplingParams(thinking_token_budget=2))
+    )
+    input_batch.add_request(_make_token_request("unbudgeted"))
+    input_batch.refresh_metadata()
+
+    input_batch.remove_request("budgeted")
+    input_batch.condense()
+    input_batch.refresh_metadata()
+
+    assert input_batch.req_id_to_index["unbudgeted"] == 0
+    holder = input_batch.thinking_budget_state_holder
+    assert holder is not None
+    assert not holder.has_tracked_requests()
 
 
 def test_pooling_model_releases_prompt_embeds():
