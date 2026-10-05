@@ -89,3 +89,29 @@ def test_swap_exchanges_two_budgeted_states():
     )
     assert h._state[0]["thinking_token_budget"] == b1
     assert h._state[1]["thinking_token_budget"] == b0
+
+
+def test_unidirectional_move_clears_stale_destination_state():
+    """condense() moves into a finished request's slot without listing it in
+    ``removed``; an unbudgeted mover must not inherit the stale budget."""
+    h = _make_holder()
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (0, SamplingParams(thinking_token_budget=2), None, []),
+                (1, SamplingParams(), None, []),
+            ],
+            moved=(),
+        )
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=(),
+            moved=[(1, 0, MoveDirectionality.UNIDIRECTIONAL)],
+        )
+    )
+    assert not h.has_tracked_requests()
